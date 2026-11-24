@@ -1,0 +1,126 @@
+---
+title: "ADS 506 Week 5: Storytelling with Shiny"
+author: "Ramin Fazli"
+date: today
+format:
+  pdf:
+    toc: false
+    geometry: ["margin=1in"]
+    fontsize: 10pt
+    colorlinks: true
+    linkcolor: blue
+    urlcolor: blue
+    fig-pos: "H"
+    header-includes:
+      - \setkomafont{title}{\normalfont\Large\bfseries}
+      - \setkomafont{author}{\normalsize}
+      - \setkomafont{date}{\normalsize}
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+# >>> EDIT THESE TWO LINKS AFTER DEPLOYING <<<
+app_url  <- "https://raminfazli.shinyapps.io/wine-forecast-lab/"
+code_url <- "https://github.com/raminfazlirf/wine-forecast-lab"
+
+source("../R/helpers.R")
+library(knitr)
+
+wines     <- load_wines("../data/AustralianWines.csv")
+focus     <- c("Sparkling", "Sweet white")
+train_end <- "1992-12-01"
+d         <- filter(wines, Varietal %in% focus)
+sp        <- split_data(d, train_end)
+fit       <- fit_models(sp$train, c("TSLM", "ETS", "ARIMA"), log_transform = FALSE, ensemble = TRUE)
+fc        <- forecast(fit, new_data = sp$valid)
+acc       <- accuracy_table(fit, fc, d)
+best      <- best_models(acc)
+specs     <- spec_table(fit)
+
+va  <- function(v, m, k = "MAPE") acc |> filter(Varietal == v, Model == m, Window == "Validation") |> pull(k)
+bst <- function(v) best$Best[best$Varietal == v]
+spec_of <- function(v, m) specs$Specification[specs$Varietal == v & specs$Model == m]
+
+monthly  <- as_tibble(d) |> mutate(m = month(Month))
+dec_mult <- monthly |> filter(Varietal == "Sparkling") |>
+  summarise(r = mean(Sales[m == 12]) / mean(Sales)) |> pull(r)
+sw_year <- as_tibble(d) |> filter(Varietal == "Sweet white") |>
+  group_by(y = year(Month)) |> summarise(s = mean(Sales))
+sw_peak_yr <- sw_year$y[which.max(sw_year$s)]
+sw_boom  <- max(sw_year$s) / sw_year$s[sw_year$y == 1984]
+sw_bust  <- sw_year$s[sw_year$y == 1991] / max(sw_year$s)
+sw_over  <- fc |> as_tibble() |> filter(Varietal == "Sweet white", .model == "TSLM") |>
+  select(Varietal, Month, .mean) |>
+  left_join(as_tibble(sp$valid) |> select(Varietal, Month, Actual = Sales),
+            by = c("Varietal", "Month")) |>
+  summarise(n = sum(.mean > Actual)) |> pull(n)
+n_valid  <- n_distinct(sp$valid$Month)
+ens_gap  <- 100 * (va("Sparkling", "Ensemble", "RMSE") / min(acc$RMSE[acc$Varietal == "Sparkling" & acc$Window == "Validation"]) - 1)
+f1 <- function(x) formatC(x, format = "f", digits = 1)
+```
+
+## Part I: Links and Description
+
+-   **Deployed Shiny App URL:** <`r app_url`>
+-   **Code URL (GitHub):** <`r code_url`>
+
+**App description.** *Australian Wine Forecast Lab* helps a planner decide which forecasting model to trust for each wine. Pick one or more varietals, a date range and a training cut-off, then click **Fit / update models**. The app fits auto-specified TSLM, ETS and ARIMA models per varietal, scores them on the held-out validation window, recommends the best one, and shows forecasts with prediction intervals.
+
+**App features**
+
+-   *Required:* monthly `tsibble` keyed by `Varietal`; varietal (multi-select) and date-range controls; overview plot with the validation window shaded; per-varietal TSLM, ETS and ARIMA with a user-set training cut-off and horizon; model-spec table (ETS form, ARIMA orders); training vs validation RMSE/MAE/MAPE/MASE; forecast plots with 80%/95% intervals and a legend.
+-   *Accuracy add-ons:* equal-weight **Ensemble** model; optional **log transform**; automatic **best-model recommendation** (lowest validation RMSE) per varietal.
+-   *Usability add-ons:* seasonal and STL decomposition views; side-by-side or overlay forecast layouts; plain-language explanation of every model form; estimated parameters; tooltips; CSV downloads of metrics and forecasts; imputed values flagged in red; About tab with reproduction steps.
+
+## Part II: One Model Does Not Fit Every Wine
+
+**Insight.** Sparkling and Sweet White need different forecasting models. Sparkling is a stable, highly seasonal series (December sales run `r f1(dec_mult)`$\times$ an average month), and `r bst("Sparkling")` forecasts it best. Sweet White went through a boom and bust: average monthly sales rose `r f1(sw_boom)`$\times$ from 1984 to `r sw_peak_yr`, then fell to `r round(100*sw_bust)`% of that peak by 1991. That regime change broke the straight-line TSLM: its validation MAPE was `r f1(va("Sweet white","TSLM"))`% against `r f1(va("Sweet white", bst("Sweet white")))`% for `r bst("Sweet white")`. **Why it matters:** a single default model for the whole range would misstate stock and production needs for the fastest-growing wine; choosing per varietal avoids that.
+
+**Evidence.** Figure 1 shows the two series behave differently: Sparkling repeats the same December peak each year, while Sweet White's level shifts. In Figure 2, the TSLM panel for Sweet White sits above the actuals in `r sw_over` of `r n_valid` validation months: its single straight trend, pulled upward by the 1980s boom, keeps rising after sales have fallen back. `r spec_of("Sweet white","ETS")` and the Ensemble re-anchor on the lower post-boom level and track the actuals, while ARIMA undershoots. For Sparkling, all models catch the December spike, and the selected `r spec_of("Sparkling","ARIMA")` uses seasonal differencing to repeat it closely. The Ensemble is best for Sweet White and within `r round(ens_gap)`% of the best RMSE for Sparkling, so it is a safe default when there is no time to compare models.
+
+**Recommendation and next steps.** Forecast each varietal with its own validated model: `r bst("Sparkling")` for Sparkling and `r bst("Sweet white")` for Sweet White, and fall back to the Ensemble for new or untested varietals. Re-run the comparison yearly: a regime change can change the best model.
+
+```{r fig-season}
+#| fig-cap: "Seasonal pattern (app tab: 1. Explore > Seasonal pattern). Inputs: Varietals = Sparkling, Sweet white; Date range = Jan 1980 to Dec 1994. Sparkling peaks every December; Sweet White's level jumps in the mid-1980s, then falls back."
+#| fig-height: 2.1
+#| out-width: "50%"
+#| fig-align: center
+if (file.exists("screenshots/fig1.png")) {
+  include_graphics("screenshots/fig1.png")
+} else {
+  plot_seasonal(d) + facet_wrap(~ Varietal, scales = "free_y", ncol = 2) +
+    labs(subtitle = NULL) + theme(legend.key.height = unit(0.4, "cm"))
+}
+```
+
+```{r fig-fc}
+#| fig-cap: "Validation forecasts with 80% intervals (app tab: 2. Forecasts > Validation check, Side-by-side). Inputs: Varietals = Sparkling, Sweet white; Training ends = Dec 1992; Models = TSLM, ETS, ARIMA; Ensemble = on; Log = off; Interval = 80%. Grey line = actual sales."
+#| fig-height: 3.3
+#| out-width: "80%"
+#| fig-align: center
+if (file.exists("screenshots/fig2.png")) {
+  include_graphics("screenshots/fig2.png")
+} else {
+  plot_forecasts(d, fc, 80, "side", train_end = train_end, show_from = "1990-01-01") +
+    theme(legend.position = "bottom", legend.box = "horizontal",
+          axis.text.x = element_text(size = 7))
+}
+```
+
+```{r tab}
+tab <- acc |>
+  filter(Window == "Validation") |>
+  select(Varietal, Model, RMSE, MAPE) |>
+  left_join(specs |> select(Varietal, Model, Specification), by = c("Varietal", "Model")) |>
+  mutate(Specification = ifelse(Model %in% c("ETS", "ARIMA"), Specification,
+                                ifelse(Model == "TSLM", "trend + season", "mean of 3")),
+         RMSE = round(RMSE, 1), MAPE = paste0(f1(MAPE), "%"),
+         Model = ifelse(Model == best$Best[match(Varietal, best$Varietal)],
+                        paste0("**", Model, "**"), Model)) |>
+  arrange(Varietal, RMSE) |>
+  select(Varietal, Model, Specification, `Validation RMSE` = RMSE, `Validation MAPE` = MAPE)
+kable(tab, caption = "Model specs and validation accuracy, Jan 1993 to Dec 1994 (app tabs 3. Model specs and 4. Accuracy, same inputs as Figure 2). Bold = recommended model.")
+```
