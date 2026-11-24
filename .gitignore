@@ -1,0 +1,11 @@
+.Rhistory
+.RData
+.Rproj.user/
+.DS_Store
+rsconnect/
+debug_app.R
+debug_out.txt
+check_plot.png
+live_check.png
+report/*_files/
+verify_live_out.txt
